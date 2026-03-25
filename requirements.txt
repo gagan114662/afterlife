@@ -1,8 +1,10 @@
 fastapi>=0.110
 uvicorn[standard]>=0.29
-anthropic>=0.25
-elevenlabs>=1.9
-pinecone-client>=5.0
+ollama>=0.3
+kokoro-tts>=0.9
+chromadb>=0.5
+TTS>=0.22
+sentence-transformers>=3.0
 pymongo>=4.10
 motor>=3.3
 structlog>=24.1

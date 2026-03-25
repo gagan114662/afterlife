@@ -1,30 +1,43 @@
 """
-Memory module: retrieve relevant memories from Pinecone and manage biography in MongoDB.
+Memory module: retrieve relevant memories from Chroma and manage biography in MongoDB.
 """
 
 import logging
 import os
+from typing import Optional
 
-import anthropic
-from pinecone import Pinecone
+import chromadb
+from sentence_transformers import SentenceTransformer
 from pymongo import MongoClient
 from pymongo.collection import Collection
 
 logger = logging.getLogger(__name__)
 
-_EMBEDDING_MODEL = "voyage-3"
-_EMBEDDING_DIM = 1024  # voyage-3 outputs 1024-dimensional vectors
+_EMBEDDING_MODEL = "all-MiniLM-L6-v2"  # 384-dim, runs on CPU
+_CHROMA_PATH = os.environ.get("CHROMA_PATH", "./data/chroma")
+_COLLECTION_NAME = "afterlife-memories"
 
-_anthropic_client: anthropic.Anthropic | None = None
+_embedding_model: Optional[SentenceTransformer] = None
+_chroma_client: Optional[chromadb.PersistentClient] = None
 
 
-def _get_anthropic_client() -> anthropic.Anthropic:
-    global _anthropic_client
-    if _anthropic_client is None:
-        _anthropic_client = anthropic.Anthropic(
-            api_key=os.environ.get("ANTHROPIC_API_KEY", "")
-        )
-    return _anthropic_client
+def _get_embedding_model() -> SentenceTransformer:
+    global _embedding_model
+    if _embedding_model is None:
+        _embedding_model = SentenceTransformer(_EMBEDDING_MODEL)
+    return _embedding_model
+
+
+def _get_embedding(text: str) -> list[float]:
+    model = _get_embedding_model()
+    return model.encode([text])[0].tolist()
+
+
+def _get_chroma_collection() -> chromadb.Collection:
+    global _chroma_client
+    if _chroma_client is None:
+        _chroma_client = chromadb.PersistentClient(path=_CHROMA_PATH)
+    return _chroma_client.get_or_create_collection(_COLLECTION_NAME)
 
 
 def _get_contacts_collection() -> Collection:
@@ -32,25 +45,6 @@ def _get_contacts_collection() -> Collection:
     db_name = os.environ.get("MONGODB_DB", "afterlife")
     client = MongoClient(uri)
     return client[db_name]["contacts"]
-
-
-def _get_pinecone_index():
-    api_key = os.environ.get("PINECONE_API_KEY", "")
-    if not api_key:
-        raise ValueError("PINECONE_API_KEY environment variable is required")
-    index_name = os.environ.get("PINECONE_INDEX", "afterlife-memories")
-    pc = Pinecone(api_key=api_key)
-    return pc.Index(index_name)
-
-
-def get_embedding(text: str) -> list[float]:
-    """Generate an embedding vector for the given text using Anthropic's Voyage model."""
-    client = _get_anthropic_client()
-    response = client.embeddings.create(
-        model=_EMBEDDING_MODEL,
-        input=[text],
-    )
-    return response.embeddings[0].embedding
 
 
 def load_contact_profile(contact_name: str) -> dict:
@@ -75,30 +69,45 @@ def load_contact_profile(contact_name: str) -> dict:
 def retrieve_relevant_memories(contact_name: str, message: str, top_k: int = 5) -> str:
     """
     Embed the user's message and retrieve the most relevant episodic memories
-    from Pinecone for the given contact.
+    from Chroma for the given contact.
 
-    Returns a formatted string of relevant memories, or empty string if Pinecone
-    is unavailable or no memories exist.
+    Returns a formatted string of relevant memories, or empty string if unavailable.
     """
     try:
-        index = _get_pinecone_index()
-        vector = get_embedding(message)
-        results = index.query(
-            vector=vector,
-            top_k=top_k,
-            filter={"contact": contact_name},
-            include_metadata=True,
+        collection = _get_chroma_collection()
+        embedding = _get_embedding(message)
+        results = collection.query(
+            query_embeddings=[embedding],
+            n_results=top_k,
+            where={"contact": contact_name},
+            include=["documents"],
         )
         memories = []
-        for match in results.get("matches", []):
-            meta = match.get("metadata", {})
-            text = meta.get("text", "")
-            if text:
-                memories.append(f"- {text}")
+        for doc in results.get("documents", [[]])[0]:
+            if doc:
+                memories.append(f"- {doc}")
         return "\n".join(memories)
     except Exception as exc:
-        logger.warning("Could not retrieve memories from Pinecone: %s", exc)
+        logger.warning("Could not retrieve memories from Chroma: %s", exc)
         return ""
+
+
+def store_memory(contact_name: str, memory_text: str, memory_id: str) -> None:
+    """
+    Store a new episodic memory for the given contact in Chroma.
+    Called after conversation sessions to persist notable exchanges.
+    """
+    try:
+        collection = _get_chroma_collection()
+        embedding = _get_embedding(memory_text)
+        collection.add(
+            ids=[memory_id],
+            embeddings=[embedding],
+            documents=[memory_text],
+            metadatas=[{"contact": contact_name}],
+        )
+    except Exception as exc:
+        logger.warning("Could not store memory in Chroma: %s", exc)
 
 
 def update_biography(contact_name: str, new_biography: str) -> None:

@@ -1,22 +1,34 @@
 """
-Conversation engine: build persona system prompt, call Claude, call ElevenLabs TTS.
+Conversation engine: build persona system prompt, call Ollama LLM, Kokoro TTS.
 """
 
 import logging
 import os
+import io
 from pathlib import Path
 from typing import Optional
 
-import anthropic
-import httpx
+import numpy as np
+import ollama
+import soundfile as sf
+from kokoro import KPipeline
 
 from services.api.memory import load_contact_profile, retrieve_relevant_memories
 
 logger = logging.getLogger(__name__)
 
 PERSONA_PROMPT_PATH = Path(__file__).parent / "prompts" / "persona.txt"
-CLAUDE_MODEL = "claude-sonnet-4-6"
-ELEVENLABS_API_BASE = "https://api.elevenlabs.io/v1"
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "llama3.2:3b")
+OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
+
+_kokoro_pipeline: Optional[KPipeline] = None
+
+
+def _get_kokoro() -> KPipeline:
+    global _kokoro_pipeline
+    if _kokoro_pipeline is None:
+        _kokoro_pipeline = KPipeline(lang_code="a")  # "a" = American English
+    return _kokoro_pipeline
 
 
 def _load_persona_template() -> str:
@@ -50,7 +62,7 @@ def reply_as_persona(
     user_message: str,
 ) -> str:
     """
-    Send the conversation history + new user message to Claude.
+    Send conversation history + user message to Ollama.
     Returns the persona's text reply.
 
     history: list of {"role": "user"|"assistant", "content": str}
@@ -67,55 +79,43 @@ def reply_as_persona(
         relevant_memories=relevant_memories,
     )
 
-    messages = list(history) + [{"role": "user", "content": user_message}]
-
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-    if not api_key:
-        raise ValueError("ANTHROPIC_API_KEY environment variable is required")
-
-    client = anthropic.Anthropic(api_key=api_key)
-    response = client.messages.create(
-        model=CLAUDE_MODEL,
-        max_tokens=1024,
-        system=system_prompt,
-        messages=messages,
+    messages = (
+        [{"role": "system", "content": system_prompt}]
+        + list(history)
+        + [{"role": "user", "content": user_message}]
     )
-    return response.content[0].text
+
+    response = ollama.chat(
+        model=OLLAMA_MODEL,
+        messages=messages,
+        options={"num_predict": 256},
+    )
+    return response["message"]["content"]
 
 
 def text_to_speech(text: str, voice_id: str) -> Optional[bytes]:
     """
-    Convert text to audio bytes using ElevenLabs TTS.
-    Returns raw MP3 bytes, or None if TTS is unavailable / voice_id is empty.
+    Convert text to MP3 bytes using Kokoro TTS.
+    voice_id is ignored (Kokoro uses a fixed voice profile).
+    Returns MP3 bytes, or None on failure.
     """
-    if not voice_id:
-        logger.info("No voice_id provided — skipping TTS")
+    if not text.strip():
         return None
-
-    api_key = os.environ.get("ELEVENLABS_API_KEY", "")
-    if not api_key:
-        logger.warning("ELEVENLABS_API_KEY not set — skipping TTS")
-        return None
-
-    url = f"{ELEVENLABS_API_BASE}/text-to-speech/{voice_id}"
-    headers = {
-        "xi-api-key": api_key,
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "text": text,
-        "model_id": "eleven_multilingual_v2",
-        "voice_settings": {
-            "stability": 0.5,
-            "similarity_boost": 0.8,
-        },
-    }
 
     try:
-        with httpx.Client(timeout=30) as client:
-            resp = client.post(url, json=payload, headers=headers)
-            resp.raise_for_status()
-            return resp.content
-    except httpx.HTTPError as exc:
-        logger.error("ElevenLabs TTS request failed: %s", exc)
+        pipeline = _get_kokoro()
+        audio_chunks = []
+        for _, _, audio in pipeline(text):
+            if audio is not None:
+                audio_chunks.append(audio)
+
+        if not audio_chunks:
+            return None
+
+        combined = np.concatenate(audio_chunks)
+        buf = io.BytesIO()
+        sf.write(buf, combined, samplerate=24000, format="mp3")
+        return buf.getvalue()
+    except Exception as exc:
+        logger.error("Kokoro TTS failed: %s", exc)
         return None

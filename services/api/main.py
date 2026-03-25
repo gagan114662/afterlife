@@ -11,12 +11,11 @@ Run locally:
   uvicorn services.api.main:app --reload --port 8000
 
 Environment variables:
-  ANTHROPIC_API_KEY    — Claude API key (required)
-  ELEVENLABS_API_KEY   — ElevenLabs API key (required)
   MONGODB_URI          — MongoDB connection string (required)
   MONGODB_DB           — MongoDB database name (default: afterlife)
-  PINECONE_API_KEY     — Pinecone API key (optional)
-  PINECONE_INDEX       — Pinecone index name (default: afterlife-memories)
+  OLLAMA_HOST          — Ollama server URL (default: http://localhost:11434)
+  OLLAMA_MODEL         — Ollama model name (default: llama3.2:3b)
+  CHROMA_PATH          — Chroma persistence path (default: ./data/chroma)
 """
 
 import base64
@@ -61,10 +60,27 @@ app = FastAPI(
 
 @app.on_event("startup")
 async def startup() -> None:
-    # Fail fast on missing required env vars.
-    _require_env("ANTHROPIC_API_KEY")
-    _require_env("ELEVENLABS_API_KEY")
+    # Only MongoDB is required. Ollama runs locally.
     _require_env("MONGODB_URI")
+
+    # Verify Ollama is reachable
+    ollama_host = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
+    try:
+        import httpx as _httpx
+        with _httpx.Client(timeout=5) as c:
+            resp = c.get(f"{ollama_host}/api/tags")
+            resp.raise_for_status()
+            models = [m["name"] for m in resp.json().get("models", [])]
+            ollama_model = os.environ.get("OLLAMA_MODEL", "llama3.2:3b")
+            if not any(ollama_model in m for m in models):
+                logger.warning(
+                    "ollama_model_not_found",
+                    model=ollama_model,
+                    available=models,
+                )
+    except Exception as exc:
+        logger.warning("ollama_health_check_failed", error=str(exc))
+        # Don't crash — let first request fail with clear error
 
     mongodb_uri = os.environ["MONGODB_URI"]
     db_name = os.environ.get("MONGODB_DB", "afterlife")

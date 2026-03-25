@@ -1,42 +1,60 @@
-"""Tests for the memory module embeddings."""
+"""Tests for the memory module."""
 from unittest.mock import MagicMock, patch
 
 
-def test_embeddings_not_zero():
-    """Verify that get_embedding returns real content, not all zeros."""
-    from services.api.memory import get_embedding
+def test_retrieve_memories_uses_chroma(monkeypatch, tmp_path):
+    """retrieve_relevant_memories should query Chroma, not Pinecone."""
 
-    mock_embedding = [0.1, 0.2, 0.3, 0.4, 0.5]
-    mock_response = MagicMock()
-    mock_response.embeddings = [MagicMock(embedding=mock_embedding)]
+    mock_collection = MagicMock()
+    mock_collection.query.return_value = {
+        "documents": [["Memory 1", "Memory 2"]],
+        "distances": [[0.1, 0.2]],
+    }
 
-    with patch("services.api.memory._get_anthropic_client") as mock_client_fn:
+    with patch("services.api.memory.chromadb.PersistentClient") as mock_client_cls, \
+         patch("services.api.memory._get_embedding") as mock_embed:
         mock_client = MagicMock()
-        mock_client.embeddings.create.return_value = mock_response
-        mock_client_fn.return_value = mock_client
+        mock_client.get_or_create_collection.return_value = mock_collection
+        mock_client_cls.return_value = mock_client
+        mock_embed.return_value = [0.1] * 384
 
-        result = get_embedding("hello world")
+        from services.api import memory
+        memory._chroma_client = None  # force re-init
 
-    assert result == mock_embedding
-    assert result != [0.0] * len(result), "Embeddings must not be all zeros"
-    assert len(result) > 0
+        result = memory.retrieve_relevant_memories("mom", "hello", top_k=2)
+        assert "Memory 1" in result
+        assert "Memory 2" in result
 
 
-def test_embeddings_called_with_correct_model():
-    """Verify that the embedding API is called with the voyage-3 model."""
-    from services.api.memory import get_embedding
+def test_load_contact_profile_not_found():
+    """load_contact_profile should raise ValueError if contact is missing."""
+    with patch("services.api.memory._get_contacts_collection") as mock_col_fn:
+        mock_collection = MagicMock()
+        mock_collection.find_one.return_value = None
+        mock_col_fn.return_value = mock_collection
 
-    mock_response = MagicMock()
-    mock_response.embeddings = [MagicMock(embedding=[0.1])]
+        from services.api.memory import load_contact_profile
+        import pytest
+        with pytest.raises(ValueError, match="not found"):
+            load_contact_profile("unknown_contact")
 
-    with patch("services.api.memory._get_anthropic_client") as mock_client_fn:
-        mock_client = MagicMock()
-        mock_client.embeddings.create.return_value = mock_response
-        mock_client_fn.return_value = mock_client
 
-        get_embedding("test text")
+def test_load_contact_profile_returns_fields():
+    """load_contact_profile should return all expected keys."""
+    with patch("services.api.memory._get_contacts_collection") as mock_col_fn:
+        mock_collection = MagicMock()
+        mock_collection.find_one.return_value = {
+            "name": "mom",
+            "biography": "A warm woman.",
+            "personality_profile": "Nurturing.",
+            "common_phrases": "Janu!",
+            "voice_id": "voice-123",
+        }
+        mock_col_fn.return_value = mock_collection
 
-        mock_client.embeddings.create.assert_called_once_with(
-            model="voyage-3",
-            input=["test text"],
-        )
+        from services.api.memory import load_contact_profile
+        result = load_contact_profile("mom")
+
+        assert result["name"] == "mom"
+        assert result["biography"] == "A warm woman."
+        assert result["voice_id"] == "voice-123"

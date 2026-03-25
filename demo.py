@@ -3,12 +3,13 @@ After-Life Demo Mode
 ====================
 Runs the full app with:
   - Local MongoDB (no credentials needed)
-  - Stubbed Anthropic Claude (canned persona responses)
-  - ElevenLabs skipped (text only, no audio)
-  - Pinecone skipped (no memory retrieval)
+  - Local Ollama LLM (llama3.2:3b)
+  - Local Chroma vector DB (no memory retrieval in demo)
+  - TTS skipped (text only, no audio)
 
 Usage:
     pip install -r requirements.txt
+    ollama pull llama3.2:3b
     python demo.py
 
 Then visit: http://localhost:8000/docs
@@ -17,16 +18,13 @@ Or test via curl — see bottom of this file.
 
 # ruff: noqa: E402
 import os
-import sys
-import random
-import unittest.mock
-from unittest.mock import MagicMock
 
 # ── Set env vars before importing the app ─────────────────────────────────────
-os.environ["ANTHROPIC_API_KEY"] = "demo-key-not-real"
-os.environ["ELEVENLABS_API_KEY"] = "demo-key-not-real"
 os.environ["MONGODB_URI"] = "mongodb://localhost:27017"
 os.environ["MONGODB_DB"] = "afterlife_demo"
+os.environ["OLLAMA_HOST"] = "http://localhost:11434"
+os.environ["OLLAMA_MODEL"] = "llama3.2:3b"
+os.environ["CHROMA_PATH"] = "/tmp/afterlife_chroma_demo"
 
 # ── Seed demo contact in MongoDB ───────────────────────────────────────────────
 from pymongo import MongoClient
@@ -57,39 +55,6 @@ def seed_demo_contact():
     client.close()
 
 
-# ── Stub responses for the persona ────────────────────────────────────────────
-DEMO_RESPONSES = [
-    "Janu! So good to hear from you. Have you eaten today? You always forget to eat when you're busy.",
-    "Waheguru meherbaan. I was just thinking about you. How is everything going, my love?",
-    "You know, I made your favourite aloo parathas this morning. Wish you were here to have some.",
-    "Don't work too hard, janu. Your health is more important than anything. Are you sleeping enough?",
-    "I miss you so much. Come home soon, okay? The house feels empty without you.",
-    "Whatever happens, I am always proud of you. You know that, right?",
-    "Janu, just remember — I am always with you. Always. Don't ever forget that.",
-]
-
-
-def make_stub_claude():
-    """Return a mock Anthropic client that gives persona-appropriate responses."""
-    mock_client = MagicMock()
-
-    def side_effect(*args, **kwargs):
-        r = MagicMock()
-        r.content = [MagicMock(text=random.choice(DEMO_RESPONSES))]
-        return r
-
-    mock_client.messages.create.side_effect = side_effect
-    return mock_client
-
-
-# ── Patch Anthropic and Pinecone before app loads ─────────────────────────────
-import anthropic
-
-anthropic.Anthropic = lambda **kwargs: make_stub_claude()
-
-# Patch Pinecone import so memory retrieval silently returns empty (no crash)
-sys.modules["pinecone"] = unittest.mock.MagicMock()
-
 # ── Seed and start ─────────────────────────────────────────────────────────────
 seed_demo_contact()
 
@@ -97,9 +62,9 @@ print("\n" + "=" * 60)
 print("  After-Life DEMO MODE")
 print("=" * 60)
 print("  Contact seeded: 'mom'")
-print("  Claude:         stubbed (canned responses)")
-print("  ElevenLabs:     skipped (text only)")
-print("  Pinecone:       skipped")
+print("  LLM:            Ollama llama3.2:3b (local)")
+print("  TTS:            skipped (text only)")
+print("  Memory:         Chroma (local, /tmp/afterlife_chroma_demo)")
 print("  MongoDB:        localhost:27017/afterlife_demo")
 print("=" * 60)
 print("\n  API docs:  http://localhost:8000/docs")
