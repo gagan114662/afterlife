@@ -4,13 +4,27 @@ Memory module: retrieve relevant memories from Pinecone and manage biography in 
 
 import logging
 import os
-from typing import Optional
 
+import anthropic
 from pinecone import Pinecone
 from pymongo import MongoClient
 from pymongo.collection import Collection
 
 logger = logging.getLogger(__name__)
+
+_EMBEDDING_MODEL = "voyage-3"
+_EMBEDDING_DIM = 1024  # voyage-3 outputs 1024-dimensional vectors
+
+_anthropic_client: anthropic.Anthropic | None = None
+
+
+def _get_anthropic_client() -> anthropic.Anthropic:
+    global _anthropic_client
+    if _anthropic_client is None:
+        _anthropic_client = anthropic.Anthropic(
+            api_key=os.environ.get("ANTHROPIC_API_KEY", "")
+        )
+    return _anthropic_client
 
 
 def _get_contacts_collection() -> Collection:
@@ -27,6 +41,16 @@ def _get_pinecone_index():
     index_name = os.environ.get("PINECONE_INDEX", "afterlife-memories")
     pc = Pinecone(api_key=api_key)
     return pc.Index(index_name)
+
+
+def get_embedding(text: str) -> list[float]:
+    """Generate an embedding vector for the given text using Anthropic's Voyage model."""
+    client = _get_anthropic_client()
+    response = client.embeddings.create(
+        model=_EMBEDDING_MODEL,
+        input=[text],
+    )
+    return response.embeddings[0].embedding
 
 
 def load_contact_profile(contact_name: str) -> dict:
@@ -58,11 +82,9 @@ def retrieve_relevant_memories(contact_name: str, message: str, top_k: int = 5) 
     """
     try:
         index = _get_pinecone_index()
-        # Use a simple embedding via a lightweight approach.
-        # In production, use a real embedding model (e.g. OpenAI text-embedding-3-small).
-        # Here we query with a metadata filter and rely on the index having stored vectors.
+        vector = get_embedding(message)
         results = index.query(
-            vector=[0.0] * 1536,  # placeholder — real embeddings needed in production
+            vector=vector,
             top_k=top_k,
             filter={"contact": contact_name},
             include_metadata=True,
@@ -90,4 +112,6 @@ def update_biography(contact_name: str, new_biography: str) -> None:
         {"$set": {"biography": new_biography}},
     )
     if result.matched_count == 0:
-        logger.warning("No contact document found for '%s' — biography not saved", contact_name)
+        logger.warning(
+            "No contact document found for '%s' — biography not saved", contact_name
+        )

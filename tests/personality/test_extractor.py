@@ -1,7 +1,7 @@
 """Tests for PersonalityExtractor - TDD red phase."""
 import json
 import pytest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 from services.personality.extractor import PersonalityExtractor, PersonalityProfile
 

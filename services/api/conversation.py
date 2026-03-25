@@ -10,7 +10,7 @@ from typing import Optional
 import anthropic
 import httpx
 
-from memory import load_contact_profile, retrieve_relevant_memories
+from services.api.memory import load_contact_profile, retrieve_relevant_memories
 
 logger = logging.getLogger(__name__)
 

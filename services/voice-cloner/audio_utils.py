@@ -2,10 +2,8 @@
 
 import subprocess
 import tempfile
-import os
 import json
 import logging
-from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -83,7 +81,6 @@ def get_silence_ratio(audio_path: str, silence_threshold_db: float = -40.0) -> O
             timeout=60,
         )
         silent_seconds = 0.0
-        silence_end = None
         for line in result.stderr.splitlines():
             if "silence_end" in line:
                 # "silence_end: 1.23 | silence_duration: 0.45"

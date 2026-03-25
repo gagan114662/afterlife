@@ -1,6 +1,6 @@
 """Tests for BiographerAgent - TDD red phase."""
 import pytest
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock
 
 from services.personality.biographer import BiographerAgent
 from services.personality.extractor import PersonalityProfile
@@ -85,8 +85,8 @@ def test_generate_biography_returns_prose(mock_claude_client, mock_mongo_collect
     assert isinstance(biography, str)
     assert len(biography) >= 100  # Should be substantial prose
     # Should not be bullet points (no lines starting with - or *)
-    lines = [l.strip() for l in biography.split("\n") if l.strip()]
-    bullet_lines = [l for l in lines if l.startswith(("- ", "* ", "• "))]
+    lines = [line.strip() for line in biography.split("\n") if line.strip()]
+    bullet_lines = [line for line in lines if line.startswith(("- ", "* ", "• "))]
     assert len(bullet_lines) == 0, f"Biography should be prose, not bullets: {bullet_lines}"
 
 
