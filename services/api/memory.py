@@ -4,10 +4,6 @@ Memory module: retrieve relevant memories from Chroma and manage biography in Mo
 
 import logging
 import os
-from typing import Optional
-
-import chromadb
-from sentence_transformers import SentenceTransformer
 from pymongo import MongoClient
 from pymongo.collection import Collection
 
@@ -17,13 +13,14 @@ _EMBEDDING_MODEL = "all-MiniLM-L6-v2"  # 384-dim, runs on CPU
 _CHROMA_PATH = os.environ.get("CHROMA_PATH", "./data/chroma")
 _COLLECTION_NAME = "afterlife-memories"
 
-_embedding_model: Optional[SentenceTransformer] = None
-_chroma_client: Optional[chromadb.PersistentClient] = None
+_embedding_model = None
+_chroma_client = None
 
 
-def _get_embedding_model() -> SentenceTransformer:
+def _get_embedding_model():
     global _embedding_model
     if _embedding_model is None:
+        from sentence_transformers import SentenceTransformer  # lazy import
         _embedding_model = SentenceTransformer(_EMBEDDING_MODEL)
     return _embedding_model
 
@@ -33,9 +30,10 @@ def _get_embedding(text: str) -> list[float]:
     return model.encode([text])[0].tolist()
 
 
-def _get_chroma_collection() -> chromadb.Collection:
+def _get_chroma_collection():
     global _chroma_client
     if _chroma_client is None:
+        import chromadb  # lazy import  # noqa: PLC0415
         _chroma_client = chromadb.PersistentClient(path=_CHROMA_PATH)
     return _chroma_client.get_or_create_collection(_COLLECTION_NAME)
 

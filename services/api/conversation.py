@@ -8,10 +8,7 @@ import io
 from pathlib import Path
 from typing import Optional
 
-import numpy as np
 import ollama
-import soundfile as sf
-from kokoro import KPipeline
 
 from services.api.memory import load_contact_profile, retrieve_relevant_memories
 
@@ -21,13 +18,14 @@ PERSONA_PROMPT_PATH = Path(__file__).parent / "prompts" / "persona.txt"
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "llama3.2:3b")
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
 
-_kokoro_pipeline: Optional[KPipeline] = None
+_kokoro_pipeline = None
 
 
-def _get_kokoro() -> KPipeline:
+def _get_kokoro():
     global _kokoro_pipeline
     if _kokoro_pipeline is None:
-        _kokoro_pipeline = KPipeline(lang_code="a")  # "a" = American English
+        from kokoro import KPipeline  # lazy import — not installed in all envs
+        _kokoro_pipeline = KPipeline(lang_code="a")
     return _kokoro_pipeline
 
 
@@ -112,6 +110,8 @@ def text_to_speech(text: str, voice_id: str) -> Optional[bytes]:
         if not audio_chunks:
             return None
 
+        import numpy as np  # noqa: PLC0415
+        import soundfile as sf  # noqa: PLC0415
         combined = np.concatenate(audio_chunks)
         buf = io.BytesIO()
         sf.write(buf, combined, samplerate=24000, format="mp3")
