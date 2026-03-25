@@ -1,9 +1,10 @@
 import { program } from 'commander';
 import { runSync } from './sync';
 import { runBot } from './bot';
+import { runPersonalSync } from './personal';
 
 program
-  .option('--mode <mode>', 'Run mode: sync | bot', 'bot')
+  .option('--mode <mode>', 'Run mode: sync | bot | personal | dual', 'bot')
   .parse(process.argv);
 
 const opts = program.opts();
@@ -16,8 +17,14 @@ async function main() {
   } else if (mode === 'bot') {
     console.log('[afterlife] Starting WhatsApp bot...');
     await runBot();
+  } else if (mode === 'personal') {
+    console.log('[afterlife] Starting personal sync instance...');
+    await runPersonalSync();
+  } else if (mode === 'dual') {
+    console.log('[afterlife] Starting dual Baileys instances (bot + personal sync)...');
+    await Promise.all([runBot(), runPersonalSync()]);
   } else {
-    console.error(`Unknown mode: ${mode}. Use --mode sync or --mode bot`);
+    console.error(`Unknown mode: ${mode}. Use --mode sync | bot | personal | dual`);
     process.exit(1);
   }
 }
