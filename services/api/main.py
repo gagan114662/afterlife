@@ -19,7 +19,6 @@ Environment variables:
 
 import base64
 import logging
-import os
 from typing import Optional
 
 from dotenv import load_dotenv
@@ -109,8 +108,8 @@ async def start_conversation(req: StartRequest) -> StartResponse:
             user_message=opening_prompt,
         )
     except Exception as exc:
-        logger.error("Failed to generate greeting: %s", exc)
-        raise HTTPException(status_code=502, detail=f"Failed to generate greeting: {exc}")
+        logger.error("Failed to generate greeting: %s", exc, exc_info=True)
+        raise HTTPException(status_code=502, detail="Service temporarily unavailable. Please try again.")
 
     # Record the greeting in history as an assistant turn.
     _sessions[session_id]["history"].append(
@@ -152,8 +151,8 @@ async def send_message(req: MessageRequest) -> MessageResponse:
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
     except Exception as exc:
-        logger.error("Claude call failed: %s", exc)
-        raise HTTPException(status_code=502, detail=f"Model call failed: {exc}")
+        logger.error("Claude call failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=502, detail="Service temporarily unavailable. Please try again.")
 
     # Append the assistant's reply to history.
     history.append({"role": "assistant", "content": reply})
@@ -171,8 +170,8 @@ async def update_biography_endpoint(req: BiographyUpdateRequest) -> None:
     try:
         update_biography(req.contact_name, req.new_biography)
     except Exception as exc:
-        logger.error("Biography update failed: %s", exc)
-        raise HTTPException(status_code=502, detail=str(exc))
+        logger.error("Biography update failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=502, detail="Service temporarily unavailable. Please try again.")
 
 
 @app.get("/health")

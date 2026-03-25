@@ -8,10 +8,13 @@ Analyzes WhatsApp message history via Claude to extract:
 Outputs a PersonalityProfile used by BiographerAgent to generate Living Biographies.
 """
 import json
+import logging
 from dataclasses import dataclass, field, asdict
 from typing import Any
 
 import anthropic
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -94,15 +97,27 @@ class PersonalityExtractor:
             messages=[{"role": "user", "content": prompt}],
         )
 
-        raw = response.content[0].text.strip()
-        data = json.loads(raw)
+        raw = None
+        try:
+            raw = response.content[0].text.strip()
+            data = json.loads(raw)
+        except (json.JSONDecodeError, IndexError, AttributeError) as exc:
+            logger.warning(
+                "claude_response_parse_failed",
+                extra={
+                    "error": str(exc),
+                    "raw_response": raw[:200] if raw else None,
+                    "contact_name": contact_name,
+                },
+            )
+            data = {}
 
         return PersonalityProfile(
             contact_name=contact_name,
             user_name=user_name,
-            linguistic_patterns=data.get("linguistic_patterns", {}),
-            emotional_patterns=data.get("emotional_patterns", {}),
-            relationship_patterns=data.get("relationship_patterns", {}),
+            linguistic_patterns=data.get("linguistic_patterns") or {},
+            emotional_patterns=data.get("emotional_patterns") or {},
+            relationship_patterns=data.get("relationship_patterns") or {},
         )
 
     def _format_messages(self, messages: list[dict], contact_name: str) -> str:
