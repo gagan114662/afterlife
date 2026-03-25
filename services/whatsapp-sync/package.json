@@ -8,7 +8,8 @@
     "start": "node dist/index.js",
     "dev": "ts-node src/index.ts",
     "sync": "ts-node src/index.ts --mode sync",
-    "bot": "ts-node src/index.ts --mode bot"
+    "bot": "ts-node src/index.ts --mode bot",
+    "test": "echo \"No tests yet\" && exit 0"
   },
   "dependencies": {
     "@whiskeysockets/baileys": "^6.7.0",
