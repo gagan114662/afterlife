@@ -15,11 +15,12 @@ Then visit: http://localhost:8000/docs
 Or test via curl — see bottom of this file.
 """
 
+# ruff: noqa: E402
 import os
 import sys
-import json
 import random
-from unittest.mock import MagicMock, patch
+import unittest.mock
+from unittest.mock import MagicMock
 
 # ── Set env vars before importing the app ─────────────────────────────────────
 os.environ["ANTHROPIC_API_KEY"] = "demo-key-not-real"
@@ -29,6 +30,7 @@ os.environ["MONGODB_DB"] = "afterlife_demo"
 
 # ── Seed demo contact in MongoDB ───────────────────────────────────────────────
 from pymongo import MongoClient
+
 
 def seed_demo_contact():
     client = MongoClient("mongodb://localhost:27017")
@@ -54,6 +56,7 @@ def seed_demo_contact():
     print("✓ Seeded demo contact: 'mom'")
     client.close()
 
+
 # ── Stub responses for the persona ────────────────────────────────────────────
 DEMO_RESPONSES = [
     "Janu! So good to hear from you. Have you eaten today? You always forget to eat when you're busy.",
@@ -65,47 +68,47 @@ DEMO_RESPONSES = [
     "Janu, just remember — I am always with you. Always. Don't ever forget that.",
 ]
 
+
 def make_stub_claude():
     """Return a mock Anthropic client that gives persona-appropriate responses."""
     mock_client = MagicMock()
-    mock_response = MagicMock()
-    mock_response.content = [MagicMock(text=random.choice(DEMO_RESPONSES))]
-    mock_client.messages.create.return_value = mock_response
-    # Re-randomise each call
+
     def side_effect(*args, **kwargs):
         r = MagicMock()
         r.content = [MagicMock(text=random.choice(DEMO_RESPONSES))]
         return r
+
     mock_client.messages.create.side_effect = side_effect
     return mock_client
 
+
 # ── Patch Anthropic and Pinecone before app loads ─────────────────────────────
 import anthropic
+
 anthropic.Anthropic = lambda **kwargs: make_stub_claude()
 
 # Patch Pinecone import so memory retrieval silently returns empty (no crash)
-import unittest.mock
-sys.modules['pinecone'] = unittest.mock.MagicMock()
+sys.modules["pinecone"] = unittest.mock.MagicMock()
 
 # ── Seed and start ─────────────────────────────────────────────────────────────
 seed_demo_contact()
 
-print("\n" + "="*60)
+print("\n" + "=" * 60)
 print("  After-Life DEMO MODE")
-print("="*60)
+print("=" * 60)
 print("  Contact seeded: 'mom'")
 print("  Claude:         stubbed (canned responses)")
 print("  ElevenLabs:     skipped (text only)")
 print("  Pinecone:       skipped")
 print("  MongoDB:        localhost:27017/afterlife_demo")
-print("="*60)
+print("=" * 60)
 print("\n  API docs:  http://localhost:8000/docs")
 print("  Health:    http://localhost:8000/health")
 print("\n  Quick test:")
-print('  curl -s -X POST http://localhost:8000/conversation/start \\')
+print("  curl -s -X POST http://localhost:8000/conversation/start \\")
 print('    -H "Content-Type: application/json" \\')
 print('    -d \'{"contact_name":"mom","user_name":"Gagan"}\' | python3 -m json.tool')
-print("\n" + "="*60 + "\n")
+print("\n" + "=" * 60 + "\n")
 
 import uvicorn
 from services.api.main import app
