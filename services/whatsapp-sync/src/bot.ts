@@ -11,18 +11,14 @@ import * as crypto from 'crypto';
 import axios from 'axios';
 import QRCode from 'qrcode';
 import { convertOggToWav } from './audio';
+import { getUserState, setUserState, UserState, ensureStateIndex, UserStateDoc } from './state';
 
 const API_BASE_URL = process.env.API_BASE_URL || 'http://localhost:8000';
 const CONTACTS_DIR = process.env.CONTACTS_DIR || './contacts';
 const ADMIN_JID = process.env.ADMIN_JID || '';
 
-interface ActiveSession {
-  contactName: string;
-  sessionId: string;
-}
-
-// Track active persona sessions per user JID
-const activeSessions = new Map<string, ActiveSession>();
+// Track users waiting for personal QR code to be sent
+const pendingQR = new Map<string, string>();
 
 export function generateJitsiUrl(): string {
   const roomId = crypto.randomBytes(8).toString('hex');
@@ -54,6 +50,8 @@ export function getAvailableContacts(contactsDir: string = CONTACTS_DIR): string
 }
 
 export async function runBot(): Promise<void> {
+  await ensureStateIndex();
+
   const { state, saveCreds } = await useMultiFileAuthState('./auth_state');
 
   const sock = makeWASocket({
@@ -90,6 +88,57 @@ export async function runBot(): Promise<void> {
       await handleMessage(sock, userJid, msg);
     }
   });
+
+  // Poll for personal QR and linked/sync status every 5 seconds
+  setInterval(async () => {
+    await checkPersonalQR(sock);
+    await checkPersonalLinked(sock);
+  }, 5000);
+}
+
+async function checkPersonalQR(sock: ReturnType<typeof makeWASocket>): Promise<void> {
+  const qrFile = '/tmp/afterlife_personal_qr.txt';
+  if (!fs.existsSync(qrFile)) return;
+
+  try {
+    const qrData = fs.readFileSync(qrFile, 'utf8').trim();
+    fs.unlinkSync(qrFile);
+
+    const qrBuffer = await QRCode.toBuffer(qrData, { type: 'png', width: 512 });
+
+    for (const [jid, status] of pendingQR) {
+      if (status === 'waiting') {
+        await sock.sendMessage(jid, {
+          image: qrBuffer,
+          caption: 'Scan this QR code with WhatsApp → Settings → Linked Devices → Link a Device',
+        });
+        pendingQR.set(jid, 'sent');
+      }
+    }
+  } catch (err) {
+    console.warn('[bot] Failed to process personal QR file:', err);
+  }
+}
+
+async function checkPersonalLinked(sock: ReturnType<typeof makeWASocket>): Promise<void> {
+  const linkedFile = '/tmp/afterlife_personal_linked.txt';
+  if (!fs.existsSync(linkedFile)) return;
+
+  try {
+    fs.unlinkSync(linkedFile);
+
+    // Advance all QR_SENT users to SYNCING
+    for (const [jid] of pendingQR) {
+      const doc = await getUserState(jid);
+      if (doc.state === UserState.QR_SENT) {
+        await setUserState(jid, { state: UserState.SYNCING });
+        await sendText(sock, jid, 'Linked! Syncing your contacts in the background...');
+        pendingQR.delete(jid);
+      }
+    }
+  } catch (err) {
+    console.warn('[bot] Failed to process personal linked file:', err);
+  }
 }
 
 async function handleQrCode(
@@ -125,7 +174,6 @@ async function handleMessage(
   msg: WAMessage
 ): Promise<void> {
   const message = msg.message!;
-  const activeSession = activeSessions.get(userJid);
 
   // Parse input
   let userText = '';
@@ -146,115 +194,142 @@ async function handleMessage(
       userText = '[voice note]';
     } catch (err) {
       console.warn('[bot] Failed to process incoming voice note:', err);
-      await sendText(sock, userJid, "Sorry, I couldn't process that voice note. Try sending a text message.");
+      await sendText(sock, userJid, "Sorry, couldn't process that voice note.");
       return;
     }
   }
 
   if (!userText && !audioBuffer) return;
 
-  // Handle "call me" request in any state
-  if (isCallMeRequest(userText)) {
-    const jitsiUrl = generateJitsiUrl();
-    await sendText(sock, userJid, `Here's your video call link:\n${jitsiUrl}\n\nClick to join — no account needed.`);
+  const userStateDoc = await getUserState(userJid);
+
+  switch (userStateDoc.state) {
+    case UserState.INIT:
+      await handleStateInit(sock, userJid);
+      break;
+
+    case UserState.QR_SENT:
+      await sendText(sock, userJid, 'Still waiting for you to scan the QR code. Check the image above.');
+      break;
+
+    case UserState.LINKED:
+    case UserState.SYNCING:
+      await sendText(sock, userJid, `Still syncing your contacts (${userStateDoc.contact_count} done so far). Almost ready!`);
+      break;
+
+    case UserState.ACTIVE:
+      await handleStateActive(sock, userJid, userText, audioBuffer, userStateDoc);
+      break;
+  }
+}
+
+async function handleStateInit(
+  sock: ReturnType<typeof makeWASocket>,
+  userJid: string
+): Promise<void> {
+  await setUserState(userJid, { state: UserState.QR_SENT });
+  await sendText(
+    sock,
+    userJid,
+    "Hi! I'm After-Life. I'll sync your WhatsApp contacts so you can speak with them.\n\nSending you a QR code now — scan it with: WhatsApp → Settings → Linked Devices → Link a Device"
+  );
+  pendingQR.set(userJid, 'waiting');
+}
+
+async function handleStateActive(
+  sock: ReturnType<typeof makeWASocket>,
+  userJid: string,
+  userText: string,
+  audioBuffer: Buffer | null,
+  userStateDoc: UserStateDoc
+): Promise<void> {
+  // Jitsi call trigger
+  if (/\b(call me|start a call|video call|voice call|let's call|lets call)\b/i.test(userText)) {
+    const sessionId = crypto.randomBytes(8).toString('hex');
+    const jitsiUrl = `https://meet.jit.si/afterlife-${sessionId}`;
+    await sendText(sock, userJid, `Tap to join: ${jitsiUrl}`);
     return;
   }
 
-  // If no active session, prompt for contact selection
-  if (!activeSession) {
+  // End session
+  if (/^(end|stop|exit|bye|goodbye)/i.test(userText)) {
+    await setUserState(userJid, { selected_contact: null, session_id: null });
+    await sendText(sock, userJid, `Session ended. Who would you like to talk to next?\n\nAvailable: ${getAvailableContacts().join(', ')}`);
+    return;
+  }
+
+  const activeContact = userStateDoc.selected_contact;
+
+  if (!activeContact) {
     const intent = parseContactIntent(userText);
     if (intent) {
       const available = getAvailableContacts();
-      const matched = available.find((c) =>
-        c.toLowerCase().includes(intent.toLowerCase())
-      );
+      const matched = available.find((c) => c.toLowerCase().includes(intent.toLowerCase()));
       if (matched) {
-        await sendText(sock, userJid, `Connecting you with ${matched}...`);
-        const session = await startConversation(matched, userJid);
-        if (session) {
-          activeSessions.set(userJid, { contactName: matched, sessionId: session.sessionId });
-          await deliverResponse(sock, userJid, session.greetingText, session.greetingAudioB64);
-        } else {
-          await sendText(sock, userJid, `Sorry, I couldn't connect you with ${matched}. Please try again.`);
-        }
+        await setUserState(userJid, { selected_contact: matched, session_id: null });
+        await converseAndRespond(sock, userJid, matched, 'Hello', null, null);
       } else {
-        const contactList = available.join(', ') || 'no contacts synced yet';
-        await sendText(sock, userJid, `I couldn't find that contact. Available: ${contactList}`);
+        await sendText(sock, userJid, `Couldn't find "${intent}". Available: ${available.join(', ') || 'none yet'}`);
       }
     } else {
-      const available = getAvailableContacts().join(', ') || 'none yet — run sync first';
-      await sendText(sock, userJid, `Hey! Who would you like to connect with today?\n\nAvailable contacts: ${available}`);
+      const available = getAvailableContacts();
+      await sendText(sock, userJid, `Who would you like to talk to?\n\nAvailable: ${available.join(', ') || 'none yet'}`);
     }
     return;
   }
 
-  // Check for "end session" command
-  if (/^(end|stop|exit|bye|goodbye)/i.test(userText)) {
-    activeSessions.delete(userJid);
-    await sendText(sock, userJid, `Ended your session with ${activeSession.contactName}. Who would you like to talk to next?`);
-    return;
-  }
-
-  // Active session: route to conversation API
-  await sendMessageToPersona(sock, userJid, activeSession, userText, audioBuffer);
+  // Active contact — route to conversation API
+  await converseAndRespond(sock, userJid, activeContact, userText, audioBuffer, userStateDoc.session_id);
 }
 
-async function startConversation(
+async function converseAndRespond(
+  sock: ReturnType<typeof makeWASocket>,
+  userJid: string,
   contactName: string,
-  userJid: string
-): Promise<{ sessionId: string; greetingText: string; greetingAudioB64: string | null } | null> {
-  try {
-    const response = await axios.post(`${API_BASE_URL}/conversation/start`, {
-      contact_name: contactName,
-      user_name: userJid,
-    });
-    return {
-      sessionId: response.data.session_id as string,
-      greetingText: response.data.greeting_text as string,
-      greetingAudioB64: response.data.greeting_audio_b64 as string | null,
-    };
-  } catch (err) {
-    console.error('[bot] Failed to start conversation:', err);
-    return null;
-  }
-}
-
-async function sendMessageToPersona(
-  sock: ReturnType<typeof makeWASocket>,
-  userJid: string,
-  session: ActiveSession,
-  text: string,
-  _audio: Buffer | null
+  userText: string,
+  audio: Buffer | null,
+  existingSessionId: string | null
 ): Promise<void> {
   try {
-    const response = await axios.post(`${API_BASE_URL}/conversation/message`, {
-      session_id: session.sessionId,
-      message: text,
-    });
-    const replyText = response.data.reply_text as string;
-    const replyAudioB64 = response.data.reply_audio_b64 as string | null;
-    await deliverResponse(sock, userJid, replyText, replyAudioB64);
+    let sessionId = existingSessionId;
+
+    if (!sessionId) {
+      const startResp = await axios.post<{ session_id: string; greeting_text: string; greeting_audio_b64?: string }>(
+        `${API_BASE_URL}/conversation/start`,
+        { contact_name: contactName, user_name: userJid.split('@')[0] },
+        { headers: { 'Content-Type': 'application/json' } }
+      );
+      sessionId = startResp.data.session_id;
+      await setUserState(userJid, { session_id: sessionId });
+
+      const greeting = startResp.data.greeting_text;
+      const greetingAudioB64 = startResp.data.greeting_audio_b64;
+      if (greetingAudioB64) {
+        const audioBytes = Buffer.from(greetingAudioB64, 'base64');
+        await sock.sendMessage(userJid, { audio: audioBytes, mimetype: 'audio/mpeg', ptt: true });
+      } else {
+        await sendText(sock, userJid, greeting);
+      }
+      if (userText === 'Hello') return;
+    }
+
+    const msgResp = await axios.post<{ reply_text: string; reply_audio_b64?: string }>(
+      `${API_BASE_URL}/conversation/message`,
+      { session_id: sessionId, message: audio ? '[voice note]' : userText },
+      { headers: { 'Content-Type': 'application/json' } }
+    );
+
+    const replyText = msgResp.data.reply_text;
+    const replyAudioB64 = msgResp.data.reply_audio_b64;
+    if (replyAudioB64) {
+      const audioBytes = Buffer.from(replyAudioB64, 'base64');
+      await sock.sendMessage(userJid, { audio: audioBytes, mimetype: 'audio/mpeg', ptt: true });
+    } else {
+      await sendText(sock, userJid, replyText);
+    }
   } catch (err) {
-    console.error('[bot] Conversation message error:', err);
+    console.error('[bot] Conversation error:', err);
     await sendText(sock, userJid, 'Something went wrong. Please try again.');
-  }
-}
-
-async function deliverResponse(
-  sock: ReturnType<typeof makeWASocket>,
-  userJid: string,
-  text: string,
-  audioB64: string | null
-): Promise<void> {
-  if (audioB64) {
-    const audioBuffer = Buffer.from(audioB64, 'base64');
-    await sock.sendMessage(userJid, {
-      audio: audioBuffer,
-      mimetype: 'audio/ogg; codecs=opus',
-      ptt: true,
-    });
-  } else if (text) {
-    await sendText(sock, userJid, text);
   }
 }
 

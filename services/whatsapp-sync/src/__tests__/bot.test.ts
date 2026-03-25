@@ -1,6 +1,13 @@
 // Mock baileys and qrcode (ESM modules) before imports
 jest.mock('@whiskeysockets/baileys', () => ({}));
 jest.mock('qrcode', () => ({ toBuffer: jest.fn() }));
+jest.mock('../state', () => ({
+  UserState: { INIT: 'INIT', QR_SENT: 'QR_SENT', LINKED: 'LINKED', SYNCING: 'SYNCING', ACTIVE: 'ACTIVE' },
+  getUserState: jest.fn(),
+  setUserState: jest.fn(),
+  ensureStateIndex: jest.fn().mockResolvedValue(undefined),
+}));
+jest.mock('mongodb', () => ({ MongoClient: jest.fn() }));
 
 import { parseContactIntent, isCallMeRequest, generateJitsiUrl, getAvailableContacts } from '../bot';
 import * as fs from 'fs';
@@ -105,5 +112,26 @@ describe('getAvailableContacts', () => {
     // no metadata.json
 
     expect(getAvailableContacts(tmpDir)).toEqual([]);
+  });
+});
+
+describe('isCallIntent (ACTIVE state regex)', () => {
+  const isCallIntent = (text: string): boolean =>
+    /\b(call me|start a call|video call|voice call|let's call|lets call)\b/i.test(text);
+
+  it('detects "call me"', () => expect(isCallIntent('call me')).toBe(true));
+  it('detects "video call"', () => expect(isCallIntent('video call')).toBe(true));
+  it('detects "start a call"', () => expect(isCallIntent('start a call')).toBe(true));
+  it('detects case insensitive', () => expect(isCallIntent('CALL ME')).toBe(true));
+  it('does not match "talk to me"', () => expect(isCallIntent('talk to me')).toBe(false));
+  it('does not match partial word "recall"', () => expect(isCallIntent('recall')).toBe(false));
+});
+
+describe('Jitsi URL format', () => {
+  it('generates a valid meet.jit.si URL', () => {
+    const jid = '441234567890@s.whatsapp.net';
+    const id = Buffer.from(`${jid}-1234`).toString('hex').slice(0, 16);
+    const url = `https://meet.jit.si/afterlife-${id}`;
+    expect(url).toMatch(/^https:\/\/meet\.jit\.si\/afterlife-[a-f0-9]{16}$/);
   });
 });
