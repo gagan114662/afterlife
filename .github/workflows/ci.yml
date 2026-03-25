@@ -85,6 +85,6 @@ jobs:
         run: |
           for dir in ${{ steps.find-ts.outputs.dirs }}; do
             cd "$dir"
-            npm test -- --if-present
+            npm test
             cd "$OLDPWD"
           done
