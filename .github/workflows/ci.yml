@@ -1,0 +1,90 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  python:
+    name: Python (ruff + pytest)
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install ruff
+        run: pip install ruff
+
+      - name: Lint with ruff
+        run: ruff check .
+
+      - name: Install service dependencies
+        run: |
+          for req in services/*/requirements.txt; do
+            pip install -r "$req"
+          done
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+      - name: Install test dependencies
+        run: |
+          pip install pytest pytest-asyncio pytest-cov
+          if [ -f tests/requirements.txt ]; then pip install -r tests/requirements.txt; fi
+
+      - name: Run tests
+        run: pytest tests/ -v
+
+  typescript:
+    name: TypeScript (tsc + npm test)
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: ["20"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: "npm"
+        continue-on-error: true
+
+      - name: Find TypeScript projects
+        id: find-ts
+        run: |
+          TS_DIRS=$(find services -name "tsconfig.json" -exec dirname {} \; | tr '\n' ' ')
+          echo "dirs=${TS_DIRS}" >> "$GITHUB_OUTPUT"
+          if [ -z "$TS_DIRS" ]; then
+            echo "no_ts=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install dependencies and typecheck
+        if: steps.find-ts.outputs.no_ts != 'true'
+        run: |
+          for dir in ${{ steps.find-ts.outputs.dirs }}; do
+            echo "Checking $dir"
+            cd "$dir"
+            npm ci
+            npx tsc --noEmit
+            cd "$OLDPWD"
+          done
+
+      - name: Run TypeScript tests
+        if: steps.find-ts.outputs.no_ts != 'true'
+        run: |
+          for dir in ${{ steps.find-ts.outputs.dirs }}; do
+            cd "$dir"
+            npm test -- --if-present
+            cd "$OLDPWD"
+          done
