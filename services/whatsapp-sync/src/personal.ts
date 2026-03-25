@@ -4,7 +4,9 @@ import makeWASocket, {
   WAMessage,
 } from '@whiskeysockets/baileys';
 import { Boom } from '@hapi/boom';
-import { upsertMessage, SyncedMessage } from './db';
+import * as fs from 'fs';
+import { upsertMessage, getDb, SyncedMessage } from './db';
+import { setUserState, UserState } from './state';
 
 export function classifyMessage(msg: WAMessage): Pick<SyncedMessage, 'type' | 'content'> | null {
   const message = msg.message;
@@ -48,8 +50,12 @@ export async function runPersonalSync(): Promise<void> {
       }
     } else if (connection === 'open') {
       console.log('[personal] Personal sync instance connected. Syncing to MongoDB...');
+      // Signal bot that personal instance is linked
+      fs.writeFileSync('/tmp/afterlife_personal_linked.txt', 'linked');
     }
   });
+
+  let syncedCount = 0;
 
   sock.ev.on('messages.upsert', async ({ messages }) => {
     for (const msg of messages) {
@@ -74,9 +80,27 @@ export async function runPersonalSync(): Promise<void> {
 
       try {
         await upsertMessage(syncedMsg);
+        syncedCount++;
       } catch (err) {
         console.warn('[personal] Failed to sync message to MongoDB:', err);
       }
+    }
+  });
+
+  // When history sync completes, advance all SYNCING users to ACTIVE
+  sock.ev.on('messaging-history.set', async ({ isLatest }) => {
+    if (!isLatest) return;
+    console.log(`[personal] Sync complete: ${syncedCount} messages synced`);
+    try {
+      const db = await getDb();
+      const userStateCol = db.collection<{ jid: string; state: string }>('user_state');
+      const syncingUsers = await userStateCol.find({ state: UserState.SYNCING }).toArray();
+      for (const u of syncingUsers) {
+        await setUserState(u.jid, { state: UserState.ACTIVE, contact_count: syncedCount });
+      }
+      console.log(`[personal] Advanced ${syncingUsers.length} user(s) to ACTIVE`);
+    } catch (err) {
+      console.warn('[personal] Failed to advance user states to ACTIVE:', err);
     }
   });
 }
