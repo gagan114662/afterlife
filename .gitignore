@@ -7,3 +7,4 @@ build/
 .venv/
 venv/
 *.egg
+node_modules/

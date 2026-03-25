@@ -2,6 +2,7 @@ import makeWASocket, {
   DisconnectReason,
   useMultiFileAuthState,
   downloadMediaMessage,
+  WAMessage,
 } from '@whiskeysockets/baileys';
 import { Boom } from '@hapi/boom';
 import * as fs from 'fs';
@@ -52,7 +53,7 @@ export async function runBot(): Promise<void> {
 async function handleMessage(
   sock: ReturnType<typeof makeWASocket>,
   userJid: string,
-  msg: { message?: Record<string, unknown>; key: { id?: string } }
+  msg: WAMessage
 ): Promise<void> {
   const message = msg.message!;
   const activeContact = activeSessions.get(userJid);

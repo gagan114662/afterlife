@@ -77,7 +77,7 @@ async function extractAllContacts(sock: ReturnType<typeof makeWASocket>): Promis
 
   // Get all chats
   const chats = await sock.groupFetchAllParticipating();
-  const contacts = sock.store?.contacts || {};
+  const contacts = (sock as unknown as { store?: { contacts?: Record<string, unknown> } }).store?.contacts || {};
 
   for (const [jid, contact] of Object.entries(contacts)) {
     if (jid.endsWith('@s.whatsapp.net')) {
@@ -110,10 +110,11 @@ async function extractContact(
   const messages: Message[] = [];
   let voiceNoteCount = 0;
 
-  // Load message history from Baileys store
-  const chatMessages = await sock.loadMessages(jid, 200);
+  // Load message history from Baileys store (best-effort; empty if store unavailable)
+  const store = (sock as unknown as { store?: { messages?: Record<string, { array?: proto.IWebMessageInfo[] }> } }).store;
+  const rawMessages = store?.messages?.[jid]?.array ?? [];
 
-  for (const msg of chatMessages.messages) {
+  for (const msg of rawMessages) {
     if (!msg.message) continue;
 
     const isFromMe = msg.key.fromMe ?? false;
