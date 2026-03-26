@@ -6,6 +6,9 @@ Endpoints:
   POST /conversation/start — start a new conversation session with a persona
   POST /conversation/message — send a message, get text + audio response
   POST /biography/update   — update contact biography
+  POST /consent/grant      — grant consent for a contact twin
+  POST /consent/revoke     — revoke consent (disables future sessions)
+  GET  /consent/status     — check consent status for a contact
 
 Run locally:
   uvicorn services.api.main:app --reload --port 8000
@@ -28,6 +31,19 @@ from fastapi import FastAPI, HTTPException, Request, Response
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field, field_validator
 
+from services.api.consent import (
+    ConsentNotFoundError,
+    ConsentNotGrantedError,
+    ConsentRevokedError,
+    ConsentStatus,
+    VoiceConsentError,
+    check_twin_eligibility,
+    check_voice_eligibility,
+    ensure_consent_indexes,
+    get_consent,
+    grant_consent,
+    revoke_consent,
+)
 from services.api.conversation import reply_as_persona, text_to_speech
 from services.api.logging_config import configure_logging
 from services.api.memory import load_contact_profile, update_biography
@@ -87,6 +103,7 @@ async def startup() -> None:
     client = AsyncIOMotorClient(mongodb_uri)
     app.state.db = client[db_name]
     await ensure_indexes(app.state.db)
+    await ensure_consent_indexes(app.state.db)
     logger.info("startup_complete", service="conversation-api")
 
 
@@ -134,6 +151,38 @@ class BiographyUpdateRequest(BaseModel):
     new_biography: str = Field(..., min_length=1, max_length=10000)
 
 
+class ConsentGrantRequest(BaseModel):
+    contact_name: str = Field(..., min_length=1, max_length=100)
+    user_name: str = Field(..., min_length=1, max_length=100)
+    voice_rights: bool = Field(default=False)
+
+    @field_validator("contact_name", "user_name")
+    @classmethod
+    def sanitize(cls, v: str) -> str:
+        return sanitize_name(v)
+
+
+class ConsentRevokeRequest(BaseModel):
+    contact_name: str = Field(..., min_length=1, max_length=100)
+    user_name: str = Field(..., min_length=1, max_length=100)
+    reason: Optional[str] = Field(default=None, max_length=500)
+
+    @field_validator("contact_name", "user_name")
+    @classmethod
+    def sanitize(cls, v: str) -> str:
+        return sanitize_name(v)
+
+
+class ConsentStatusResponse(BaseModel):
+    contact_name: str
+    user_name: str
+    status: str
+    approved: bool
+    voice_rights: bool
+    approved_at: Optional[str] = None
+    revoked_at: Optional[str] = None
+
+
 class HealthResponse(BaseModel):
     status: str
     service: str
@@ -151,10 +200,22 @@ async def health() -> HealthResponse:
 async def start_conversation(req: StartRequest, request: Request) -> StartResponse:
     """
     Start a new conversation session with a persona.
+    Requires active consent for the contact. Voice audio requires voice-rights.
     Loads the contact's biography from MongoDB, generates an opening greeting,
     and returns the session ID for subsequent messages.
     """
     db = request.app.state.db
+
+    # ── Consent gate ──────────────────────────────────────────────────────────
+    try:
+        await check_twin_eligibility(db, req.contact_name, req.user_name)
+    except ConsentNotFoundError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except ConsentRevokedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except ConsentNotGrantedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+
     try:
         profile = load_contact_profile(req.contact_name)
     except ValueError as exc:
@@ -187,7 +248,15 @@ async def start_conversation(req: StartRequest, request: Request) -> StartRespon
 
     await append_message(db, session_id, "assistant", greeting)
 
-    audio_b64 = _tts_to_b64(greeting, profile.get("voice_id", ""))
+    # ── Voice gate: only use cloned voice if voice-rights approved ────────────
+    voice_id = profile.get("voice_id", "")
+    if voice_id:
+        try:
+            await check_voice_eligibility(db, req.contact_name, req.user_name)
+        except (ConsentNotFoundError, ConsentRevokedError, VoiceConsentError):
+            voice_id = ""  # Fall back to no voice audio; don't error the session
+
+    audio_b64 = _tts_to_b64(greeting, voice_id)
     return StartResponse(
         session_id=session_id,
         greeting_text=greeting,
@@ -199,6 +268,7 @@ async def start_conversation(req: StartRequest, request: Request) -> StartRespon
 async def send_message(req: MessageRequest, request: Request) -> MessageResponse:
     """
     Send a message to the persona and receive a text (+ optional audio) reply.
+    Consent is re-checked on every message so revocation takes effect immediately.
     """
     db = request.app.state.db
     session = await get_session(db, req.session_id)
@@ -209,6 +279,16 @@ async def send_message(req: MessageRequest, request: Request) -> MessageResponse
     user_name = session["user_name"]
     history = session["history"]
     voice_id = session.get("voice_id", "")
+
+    # ── Consent re-check: revocation must disable active sessions ─────────────
+    try:
+        await check_twin_eligibility(db, contact_name, user_name)
+    except ConsentNotFoundError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except ConsentRevokedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except ConsentNotGrantedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
 
     await append_message(db, req.session_id, "user", req.message)
 
@@ -248,6 +328,88 @@ async def update_biography_endpoint(req: BiographyUpdateRequest) -> None:
             status_code=502,
             detail="Service temporarily unavailable. Please try again.",
         )
+
+
+# ─── Consent Endpoints ───────────────────────────────────────────────────────
+
+
+@app.post("/consent/grant", status_code=204)
+async def grant_consent_endpoint(
+    req: ConsentGrantRequest, request: Request
+) -> None:
+    """
+    Grant consent for a contact twin.
+    Set voice_rights=true to also permit voice cloning for this contact.
+    """
+    db = request.app.state.db
+    try:
+        await grant_consent(
+            db,
+            contact_name=req.contact_name,
+            owner_user_id=req.user_name,
+            voice_rights=req.voice_rights,
+        )
+    except Exception as exc:
+        logger.error("consent_grant_failed", error=str(exc), exc_info=True)
+        raise HTTPException(
+            status_code=502,
+            detail="Service temporarily unavailable. Please try again.",
+        )
+
+
+@app.post("/consent/revoke", status_code=204)
+async def revoke_consent_endpoint(
+    req: ConsentRevokeRequest, request: Request
+) -> None:
+    """
+    Revoke consent for a contact twin.
+    Immediately blocks all future sessions and voice cloning for this contact.
+    """
+    db = request.app.state.db
+    try:
+        await revoke_consent(
+            db,
+            contact_name=req.contact_name,
+            owner_user_id=req.user_name,
+            reason=req.reason,
+        )
+    except ConsentNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except Exception as exc:
+        logger.error("consent_revoke_failed", error=str(exc), exc_info=True)
+        raise HTTPException(
+            status_code=502,
+            detail="Service temporarily unavailable. Please try again.",
+        )
+
+
+@app.get("/consent/status", response_model=ConsentStatusResponse)
+async def consent_status_endpoint(
+    contact_name: str,
+    user_name: str,
+    request: Request,
+) -> ConsentStatusResponse:
+    """Return the current consent status for a contact/user pair."""
+    db = request.app.state.db
+    record = await get_consent(db, sanitize_name(contact_name), sanitize_name(user_name))
+    if record is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No consent record found for contact '{contact_name}'",
+        )
+    return ConsentStatusResponse(
+        contact_name=record["contact_name"],
+        user_name=record["owner_user_id"],
+        status=record.get("status", ConsentStatus.PENDING),
+        approved=record.get("approved", False),
+        voice_rights=record.get("voice_rights", False),
+        approved_at=(
+            record["approved_at"].isoformat() if record.get("approved_at") else None
+        ),
+        revoked_at=(
+            record["revoked_at"].isoformat() if record.get("revoked_at") else None
+        ),
+    )
 
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
