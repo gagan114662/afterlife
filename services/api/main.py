@@ -45,6 +45,13 @@ from services.api.consent import (
     revoke_consent,
 )
 from services.api.conversation import reply_as_persona, text_to_speech
+from services.api.livekit_session import (
+    create_or_resume_session as create_or_resume_livekit_session,
+    end_livekit_session,
+    ensure_livekit_indexes,
+    generate_participant_token,
+    get_livekit_session,
+)
 from services.api.logging_config import configure_logging
 from services.api.memory import load_contact_profile, update_biography
 from services.api.sanitize import sanitize_name
@@ -104,6 +111,7 @@ async def startup() -> None:
     app.state.db = client[db_name]
     await ensure_indexes(app.state.db)
     await ensure_consent_indexes(app.state.db)
+    await ensure_livekit_indexes(app.state.db)
     logger.info("startup_complete", service="conversation-api")
 
 
@@ -186,6 +194,36 @@ class ConsentStatusResponse(BaseModel):
 class HealthResponse(BaseModel):
     status: str
     service: str
+
+
+class VoiceSessionStartRequest(BaseModel):
+    contact_name: str = Field(..., min_length=1, max_length=100)
+    user_name: str = Field(..., min_length=1, max_length=100)
+
+    @field_validator("contact_name", "user_name")
+    @classmethod
+    def sanitize(cls, v: str) -> str:
+        return sanitize_name(v)
+
+
+class VoiceSessionStartResponse(BaseModel):
+    session_id: str
+    room_name: str
+    token: str
+    livekit_url: str
+    is_new: bool
+
+
+class VoiceSessionEndRequest(BaseModel):
+    session_id: str = Field(..., min_length=36, max_length=36)
+
+
+class VoiceSessionStatusResponse(BaseModel):
+    session_id: str
+    room_name: str
+    contact_name: str
+    user_name: str
+    state: str
 
 
 # ─── Endpoints ────────────────────────────────────────────────────────────────
@@ -409,6 +447,130 @@ async def consent_status_endpoint(
         revoked_at=(
             record["revoked_at"].isoformat() if record.get("revoked_at") else None
         ),
+    )
+
+
+# ─── LiveKit Voice Session Endpoints ─────────────────────────────────────────
+
+
+@app.post("/voice/session/start", response_model=VoiceSessionStartResponse)
+async def start_voice_session(
+    req: VoiceSessionStartRequest, request: Request
+) -> VoiceSessionStartResponse:
+    """
+    Start (or reconnect to) a LiveKit realtime voice session with the consented twin.
+
+    Requires active consent with voice_rights=True.
+    Calling this endpoint again for the same contact/user pair returns the
+    existing active session (reconnect-safe, same room name).
+    Returns a LiveKit participant token and room details for the client to connect.
+    """
+    db = request.app.state.db
+
+    # ── Twin consent gate ─────────────────────────────────────────────────────
+    try:
+        await check_twin_eligibility(db, req.contact_name, req.user_name)
+    except ConsentNotFoundError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except ConsentRevokedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except ConsentNotGrantedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+
+    # ── Voice rights gate ─────────────────────────────────────────────────────
+    try:
+        await check_voice_eligibility(db, req.contact_name, req.user_name)
+    except ConsentNotFoundError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except ConsentRevokedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except VoiceConsentError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+
+    # ── Load contact profile for voice_id ─────────────────────────────────────
+    try:
+        profile = load_contact_profile(req.contact_name)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+    voice_id = profile.get("voice_id", "")
+
+    # ── Create or resume LiveKit session ──────────────────────────────────────
+    session = await create_or_resume_livekit_session(
+        db,
+        contact_name=req.contact_name,
+        user_name=req.user_name,
+        voice_id=voice_id,
+    )
+
+    # ── Generate participant token ─────────────────────────────────────────────
+    livekit_url = os.environ.get("LIVEKIT_URL", "")
+    api_key = os.environ.get("LIVEKIT_API_KEY", "")
+    api_secret = os.environ.get("LIVEKIT_API_SECRET", "")
+
+    try:
+        token = generate_participant_token(
+            room_name=session["room_name"],
+            participant_identity=req.user_name,
+            api_key=api_key,
+            api_secret=api_secret,
+        )
+    except ValueError as exc:
+        logger.error("livekit_token_generation_failed", error=str(exc))
+        raise HTTPException(
+            status_code=503,
+            detail="LiveKit is not configured. Set LIVEKIT_API_KEY and LIVEKIT_API_SECRET.",
+        )
+    except Exception as exc:
+        logger.error("livekit_token_generation_failed", error=str(exc), exc_info=True)
+        raise HTTPException(
+            status_code=502,
+            detail="Failed to generate voice session token.",
+        )
+
+    logger.info(
+        "voice_session_started",
+        session_id=session["session_id"],
+        room=session["room_name"],
+        contact=req.contact_name,
+        is_new=session["is_new"],
+    )
+
+    return VoiceSessionStartResponse(
+        session_id=session["session_id"],
+        room_name=session["room_name"],
+        token=token,
+        livekit_url=livekit_url,
+        is_new=session["is_new"],
+    )
+
+
+@app.post("/voice/session/end", status_code=204)
+async def end_voice_session(
+    req: VoiceSessionEndRequest, request: Request
+) -> None:
+    """End an active LiveKit voice session."""
+    db = request.app.state.db
+    found = await end_livekit_session(db, req.session_id)
+    if not found:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+
+@app.get("/voice/session/{session_id}/status", response_model=VoiceSessionStatusResponse)
+async def voice_session_status(
+    session_id: str, request: Request
+) -> VoiceSessionStatusResponse:
+    """Return the current status of a LiveKit voice session."""
+    db = request.app.state.db
+    session = await get_livekit_session(db, session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return VoiceSessionStatusResponse(
+        session_id=session["session_id"],
+        room_name=session["room_name"],
+        contact_name=session["contact_name"],
+        user_name=session["user_name"],
+        state=session["state"],
     )
 
 
