@@ -2,8 +2,8 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-COPY services/personality/requirements.txt /app/requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt
+COPY services/personality/requirements.txt /app/services/personality/requirements.txt
+RUN pip install --no-cache-dir -r /app/services/personality/requirements.txt
 
 COPY services/personality/ /app/services/personality/
 
