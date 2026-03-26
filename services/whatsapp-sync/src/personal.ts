@@ -24,6 +24,9 @@ export function classifyMessage(msg: WAMessage): Pick<SyncedMessage, 'type' | 'c
   if (message.imageMessage) {
     return { type: 'photo', content: message.imageMessage.caption || '[photo]' };
   }
+  if (message.videoMessage) {
+    return { type: 'video', content: message.videoMessage.caption || '[video]' };
+  }
   return null;
 }
 
@@ -75,6 +78,7 @@ export async function runPersonalSync(): Promise<void> {
         from: msg.key.fromMe ? 'me' : 'them',
         type: classified.type,
         content: classified.content,
+        media_path: null,
         syncedAt: new Date(),
       };
 

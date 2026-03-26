@@ -37,6 +37,7 @@ describe('upsertMessage', () => {
       from: 'them',
       type: 'text',
       content: 'Hello',
+      media_path: null,
       syncedAt: new Date('2024-01-01'),
     };
 
@@ -58,6 +59,7 @@ describe('upsertMessage', () => {
       from: 'me',
       type: 'text',
       content: 'Hi',
+      media_path: null,
       syncedAt: new Date(),
     };
 

@@ -21,8 +21,9 @@ export interface SyncedMessage {
   messageId: string;
   timestamp: number;
   from: 'me' | 'them';
-  type: 'text' | 'voice_note' | 'photo' | 'other';
+  type: 'text' | 'voice_note' | 'photo' | 'video' | 'other';
   content: string;
+  media_path: string | null;
   syncedAt: Date;
 }
 

@@ -46,6 +46,16 @@ describe('classifyMessage', () => {
     expect(classifyMessage(msg)).toEqual({ type: 'photo', content: '[photo]' });
   });
 
+  it('classifies video message as video', () => {
+    const msg = makeMsg({ message: { videoMessage: { caption: 'Watch this' } } });
+    expect(classifyMessage(msg)).toEqual({ type: 'video', content: 'Watch this' });
+  });
+
+  it('uses default caption for video without caption', () => {
+    const msg = makeMsg({ message: { videoMessage: {} } });
+    expect(classifyMessage(msg)).toEqual({ type: 'video', content: '[video]' });
+  });
+
   it('returns null for unrecognized message types', () => {
     const msg = makeMsg({ message: { stickerMessage: {} } });
     expect(classifyMessage(msg)).toBeNull();
