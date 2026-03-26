@@ -3,21 +3,27 @@ version: "3.9"
 # After-Life — Docker Compose
 #
 # Usage:
-#   cp .env.example .env          # fill in ADMIN_JID (and optionally ELEVENLABS_API_KEY)
-#   docker compose up             # start everything
-#   docker compose up api         # start only the conversation API + its deps
+#   cp .env.example .env          # fill in API keys (ANTHROPIC, ELEVENLABS, PINECONE, etc.)
+#   docker compose up             # start core services
+#   docker compose up api         # start only the conversation API + dependencies
 #   docker compose logs -f        # tail all logs
 #
-# First-time Ollama model pull (run once after `docker compose up -d ollama`):
-#   docker exec afterlife-ollama ollama pull llama3.2:3b
+# Optional: Pinecone local emulator (for development without a cloud account):
+#   docker compose --profile local-pinecone up
+#   Set PINECONE_HOST=http://pinecone-local:5081 in .env to point services at it.
 #
 # QR pairing flow:
-#   1. `docker compose up` — after first start the whatsapp-bot prints a QR code to stdout.
+#   1. `docker compose up` — on first start the whatsapp-bot prints a QR code to stdout.
 #      Read it: `docker compose logs whatsapp-bot`
 #   2. Scan that QR with the **bot** WhatsApp account to link it.
 #   3. Auth state is persisted in ./data/baileys-bot — no rescan needed on restart.
 #   4. Message the bot account from your personal WhatsApp to begin onboarding.
 #      The bot will send you a second QR for your personal account link.
+#
+# Worker services (voice-cloner, personality) are batch workers.
+# Run them on demand:
+#   docker compose run voice-cloner python -m services.voice-cloner.elevenlabs_cloner
+#   docker compose run personality python -m services.personality.extractor
 #
 # Fixture replay (local dev only):
 #   Place pre-recorded contact exports in ./data/fixtures/contacts/ and set
@@ -41,23 +47,22 @@ services:
       retries: 5
       start_period: 20s
 
-  ollama:
-    image: ollama/ollama:latest
-    container_name: afterlife-ollama
-    restart: unless-stopped
+  # Optional: Pinecone local emulator — activate with --profile local-pinecone
+  # Provides a Pinecone-compatible HTTP API at http://pinecone-local:5081
+  # Set PINECONE_HOST=http://pinecone-local:5081 in .env to use it.
+  pinecone-local:
+    image: ghcr.io/pinecone-io/pinecone-local:latest
+    container_name: afterlife-pinecone-local
+    profiles:
+      - local-pinecone
     ports:
-      - "11434:11434"
-    volumes:
-      - ollama_models:/root/.ollama
-    healthcheck:
-      test: ["CMD", "ollama", "list"]
-      interval: 15s
-      timeout: 10s
-      retries: 5
-      start_period: 30s
+      - "5081:5081"
+    environment:
+      - PORT=5081
 
   # ─── Application Services ────────────────────────────────────────────────────
 
+  # 1. Conversation API — FastAPI backend powering persona conversations
   api:
     build:
       context: .
@@ -67,21 +72,21 @@ services:
     depends_on:
       mongodb:
         condition: service_healthy
-      ollama:
-        condition: service_started
     ports:
       - "${PORT:-8000}:8000"
     env_file:
       - .env
     environment:
       - MONGODB_URI=${MONGODB_URI:-mongodb://mongodb:27017}
-      - MONGODB_DB=${MONGODB_DB:-afterlife}
-      - OLLAMA_HOST=${OLLAMA_HOST:-http://ollama:11434}
-      - OLLAMA_MODEL=${OLLAMA_MODEL:-llama3.2:3b}
-      - CHROMA_PATH=${CHROMA_PATH:-/data/chroma}
-    volumes:
-      - chroma_data:/data/chroma
-      - contacts_data:/data/contacts
+      - MONGODB_DB=${MONGODB_DB_NAME:-afterlife}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY}
+      - PINECONE_API_KEY=${PINECONE_API_KEY}
+      - PINECONE_INDEX=${PINECONE_INDEX:-afterlife-memories}
+      - PINECONE_HOST=${PINECONE_HOST:-}
+      - LIVEKIT_URL=${LIVEKIT_URL:-}
+      - LIVEKIT_API_KEY=${LIVEKIT_API_KEY:-}
+      - LIVEKIT_API_SECRET=${LIVEKIT_API_SECRET:-}
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 15s
@@ -89,6 +94,7 @@ services:
       retries: 5
       start_period: 20s
 
+  # 2. WhatsApp Sync (Baileys) — bot interface + contact data sync
   whatsapp-bot:
     build:
       context: services/whatsapp-sync
@@ -105,16 +111,18 @@ services:
       - .env
     environment:
       - MONGODB_URI=${MONGODB_URI:-mongodb://mongodb:27017}
-      - MONGODB_DB=${MONGODB_DB:-afterlife}
+      - MONGODB_DB=${MONGODB_DB_NAME:-afterlife}
       - API_BASE_URL=${API_BASE_URL:-http://api:8000}
       - CONTACTS_DIR=${CONTACTS_DIR:-/data/contacts}
       - ADMIN_JID=${ADMIN_JID}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
     volumes:
       # Baileys auth state — persists the bot QR link across restarts
       - ./data/baileys-bot:/app/baileys_auth_info
       - contacts_data:/data/contacts
     # QR code is logged to stdout on first start — run: docker compose logs whatsapp-bot
 
+  # WhatsApp personal sync — optional service for syncing the user's own account
   whatsapp-personal-sync:
     build:
       context: services/whatsapp-sync
@@ -129,8 +137,9 @@ services:
       - .env
     environment:
       - MONGODB_URI=${MONGODB_URI:-mongodb://mongodb:27017}
-      - MONGODB_DB=${MONGODB_DB:-afterlife}
+      - MONGODB_DB=${MONGODB_DB_NAME:-afterlife}
       - CONTACTS_DIR=${CONTACTS_DIR:-/data/contacts}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
     volumes:
       # Per-user Baileys auth states are written here by the bot at runtime
       - ./data/baileys-personal:/app/personal_sessions
@@ -138,8 +147,49 @@ services:
     profiles:
       - personal-sync
 
+  # 3. Voice Cloner — ElevenLabs voice clone pipeline (batch worker)
+  voice-cloner:
+    build:
+      context: .
+      dockerfile: services/voice-cloner/Dockerfile
+    container_name: afterlife-voice-cloner
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      - MONGODB_URI=${MONGODB_URI:-mongodb://mongodb:27017}
+      - MONGODB_DB=${MONGODB_DB_NAME:-afterlife}
+      - ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY}
+    volumes:
+      - contacts_data:/data/contacts
+    # Batch worker — kept alive and invoked on demand:
+    #   docker compose exec voice-cloner python -m services.voice-cloner.elevenlabs_cloner
+
+  # 4. Personality — Claude-powered personality extraction + living biography (batch worker)
+  personality:
+    build:
+      context: .
+      dockerfile: services/personality/Dockerfile
+    container_name: afterlife-personality
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      - MONGODB_URI=${MONGODB_URI:-mongodb://mongodb:27017}
+      - MONGODB_DB=${MONGODB_DB_NAME:-afterlife}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - PINECONE_API_KEY=${PINECONE_API_KEY}
+      - PINECONE_INDEX=${PINECONE_INDEX:-afterlife-memories}
+      - PINECONE_HOST=${PINECONE_HOST:-}
+    volumes:
+      - contacts_data:/data/contacts
+    # Batch worker — kept alive and invoked on demand:
+    #   docker compose exec personality python -m services.personality.extractor
+
 volumes:
   mongodb_data:
-  ollama_models:
-  chroma_data:
   contacts_data:
