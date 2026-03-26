@@ -8,3 +8,6 @@ build/
 venv/
 *.egg
 node_modules/
+
+# Local runtime data (Baileys auth, contacts, chroma, fixtures)
+data/

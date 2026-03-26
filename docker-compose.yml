@@ -1,0 +1,145 @@
+version: "3.9"
+
+# After-Life — Docker Compose
+#
+# Usage:
+#   cp .env.example .env          # fill in ADMIN_JID (and optionally ELEVENLABS_API_KEY)
+#   docker compose up             # start everything
+#   docker compose up api         # start only the conversation API + its deps
+#   docker compose logs -f        # tail all logs
+#
+# First-time Ollama model pull (run once after `docker compose up -d ollama`):
+#   docker exec afterlife-ollama ollama pull llama3.2:3b
+#
+# QR pairing flow:
+#   1. `docker compose up` — after first start the whatsapp-bot prints a QR code to stdout.
+#      Read it: `docker compose logs whatsapp-bot`
+#   2. Scan that QR with the **bot** WhatsApp account to link it.
+#   3. Auth state is persisted in ./data/baileys-bot — no rescan needed on restart.
+#   4. Message the bot account from your personal WhatsApp to begin onboarding.
+#      The bot will send you a second QR for your personal account link.
+#
+# Fixture replay (local dev only):
+#   Place pre-recorded contact exports in ./data/fixtures/contacts/ and set
+#   CONTACTS_DIR=/data/fixtures/contacts in .env to skip live sync.
+
+services:
+  # ─── Infrastructure ──────────────────────────────────────────────────────────
+
+  mongodb:
+    image: mongo:7
+    container_name: afterlife-mongodb
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: afterlife-ollama
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_models:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  # ─── Application Services ────────────────────────────────────────────────────
+
+  api:
+    build:
+      context: .
+      dockerfile: services/api/Dockerfile
+    container_name: afterlife-api
+    restart: unless-stopped
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      ollama:
+        condition: service_started
+    ports:
+      - "${PORT:-8000}:8000"
+    env_file:
+      - .env
+    environment:
+      - MONGODB_URI=${MONGODB_URI:-mongodb://mongodb:27017}
+      - MONGODB_DB=${MONGODB_DB:-afterlife}
+      - OLLAMA_HOST=${OLLAMA_HOST:-http://ollama:11434}
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-llama3.2:3b}
+      - CHROMA_PATH=${CHROMA_PATH:-/data/chroma}
+    volumes:
+      - chroma_data:/data/chroma
+      - contacts_data:/data/contacts
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  whatsapp-bot:
+    build:
+      context: services/whatsapp-sync
+      dockerfile: Dockerfile
+    container_name: afterlife-whatsapp-bot
+    restart: unless-stopped
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    command: ["node", "dist/index.js", "--mode", "bot"]
+    env_file:
+      - .env
+    environment:
+      - MONGODB_URI=${MONGODB_URI:-mongodb://mongodb:27017}
+      - MONGODB_DB=${MONGODB_DB:-afterlife}
+      - API_BASE_URL=${API_BASE_URL:-http://api:8000}
+      - CONTACTS_DIR=${CONTACTS_DIR:-/data/contacts}
+      - ADMIN_JID=${ADMIN_JID}
+    volumes:
+      # Baileys auth state — persists the bot QR link across restarts
+      - ./data/baileys-bot:/app/baileys_auth_info
+      - contacts_data:/data/contacts
+    # QR code is logged to stdout on first start — run: docker compose logs whatsapp-bot
+
+  whatsapp-personal-sync:
+    build:
+      context: services/whatsapp-sync
+      dockerfile: Dockerfile
+    container_name: afterlife-whatsapp-personal
+    restart: unless-stopped
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    command: ["node", "dist/index.js", "--mode", "personal"]
+    env_file:
+      - .env
+    environment:
+      - MONGODB_URI=${MONGODB_URI:-mongodb://mongodb:27017}
+      - MONGODB_DB=${MONGODB_DB:-afterlife}
+      - CONTACTS_DIR=${CONTACTS_DIR:-/data/contacts}
+    volumes:
+      # Per-user Baileys auth states are written here by the bot at runtime
+      - ./data/baileys-personal:/app/personal_sessions
+      - contacts_data:/data/contacts
+    profiles:
+      - personal-sync
+
+volumes:
+  mongodb_data:
+  ollama_models:
+  chroma_data:
+  contacts_data:
