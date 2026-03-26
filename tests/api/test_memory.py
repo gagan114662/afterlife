@@ -11,16 +11,14 @@ def test_retrieve_memories_uses_chroma(monkeypatch, tmp_path):
         "distances": [[0.1, 0.2]],
     }
 
-    with patch("services.api.memory.chromadb.PersistentClient") as mock_client_cls, \
+    # chromadb is lazy-imported inside _get_chroma_collection, so patch the
+    # helper function directly rather than the module-level attribute.
+    with patch("services.api.memory._get_chroma_collection") as mock_get_col, \
          patch("services.api.memory._get_embedding") as mock_embed:
-        mock_client = MagicMock()
-        mock_client.get_or_create_collection.return_value = mock_collection
-        mock_client_cls.return_value = mock_client
+        mock_get_col.return_value = mock_collection
         mock_embed.return_value = [0.1] * 384
 
         from services.api import memory
-        memory._chroma_client = None  # force re-init
-
         result = memory.retrieve_relevant_memories("mom", "hello", top_k=2)
         assert "Memory 1" in result
         assert "Memory 2" in result

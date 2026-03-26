@@ -27,18 +27,16 @@ def test_reply_as_persona_uses_ollama(monkeypatch):
 
 
 def test_text_to_speech_uses_kokoro(monkeypatch):
-    """text_to_speech should call KPipeline from kokoro, not ElevenLabs."""
-    with patch("services.api.conversation.KPipeline") as mock_pipeline_cls:
-        mock_pipeline = MagicMock()
-        # KPipeline returns an iterable of (grapheme, phoneme, audio_tensor)
-        import numpy as np
-        mock_pipeline.return_value = [(None, None, np.zeros(1000, dtype="float32"))]
-        mock_pipeline_cls.return_value = mock_pipeline
+    """text_to_speech should call the Kokoro pipeline, not ElevenLabs."""
+    import numpy as np
 
+    # KPipeline is lazy-imported inside _get_kokoro, so patch the helper
+    # function directly to return a mock pipeline instance.
+    mock_pipeline = MagicMock()
+    mock_pipeline.return_value = [(None, None, np.zeros(1000, dtype="float32"))]
+
+    with patch("services.api.conversation._get_kokoro", return_value=mock_pipeline):
         from services.api import conversation
-        # Force re-init
-        conversation._kokoro_pipeline = None
-
         result = conversation.text_to_speech("hello", "")
         assert result is not None
         assert isinstance(result, bytes)
