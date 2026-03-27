@@ -3,6 +3,7 @@ import makeWASocket, {
   useMultiFileAuthState,
   downloadMediaMessage,
   proto,
+  WAMessage,
 } from '@whiskeysockets/baileys';
 import { Boom } from '@hapi/boom';
 import * as fs from 'fs';
@@ -116,6 +117,7 @@ async function extractContact(
 
   for (const msg of rawMessages) {
     if (!msg.message) continue;
+    if (!msg.key) continue;
 
     const isFromMe = msg.key.fromMe ?? false;
     const timestamp = typeof msg.messageTimestamp === 'number'
@@ -138,7 +140,7 @@ async function extractContact(
       const oggPath = path.join(voiceNotesDir, filename);
 
       try {
-        const buffer = await downloadMediaMessage(msg, 'buffer', {});
+        const buffer = await downloadMediaMessage(msg as WAMessage, 'buffer', {});
         fs.writeFileSync(oggPath, buffer as Buffer);
 
         const wavPath = oggPath.replace('.ogg', '.wav');
